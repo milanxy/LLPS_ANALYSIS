@@ -1,0 +1,791 @@
+!*************************************************************************************!
+
+!Precision_control 
+!*************************************************************************************!    
+      module Precision_Control
+      implicit none
+      integer, parameter :: single = selected_real_kind(p=6,r=37) !single precision
+      integer, parameter :: double = selected_real_kind(p=15,r=37) !double precision
+      integer, parameter :: quad= selected_real_kind(p=33,r=4931)  !quadruple precision
+      save
+      end module
+
+
+!*************************************************************************************!
+
+!Parameter definition
+!*************************************************************************************! 
+
+      module Param_Control
+      Use Precision_Control
+      implicit none
+      integer:: step_num, Nstep,Nstepskip, Npolymer, Nresi, Nbead_per_resi, Ndim
+      real(kind=double) ::rho
+
+      CHARACTER(LEN=100),PARAMETER ::FMT1="(3f8.3)"
+      save
+      end module
+
+!*************************************************************************************!
+
+!Variable definition
+!*************************************************************************************! 
+      module Var_Control
+      Use Precision_Control
+      Use Param_Control
+      implicit none
+      integer ::istep
+      real(kind=double), allocatable, dimension(:,:) :: x, y, z
+      real(kind=double)::boxlen, binsize
+      real(kind=double), allocatable, dimension(:,:) :: com
+      real(kind=double), allocatable, dimension(:,:) ::com_x,com_y,com_z
+      real(kind=double), allocatable, dimension(:,:) ::com_droplet_x,com_droplet_y, com_droplet_z
+      integer::Nbin
+      real(kind=double),allocatable,dimension(:):: unnorm_summed_numbers
+      real(kind=double):: av_largest_cluster
+
+      integer, allocatable,dimension(:) ::  num_neighbor
+      integer, allocatable,dimension(:,:)::neighborlist
+      integer, allocatable,dimension(:) ::cluster_head, cluster_tail, cluster_size, cluster_list, cluster_checked
+      integer,allocatable, dimension(:) :: state
+      integer ::clustersum, av_droplet
+      integer,allocatable,dimension(:,:)::listed_id,id_droplet,id_free_single
+      integer,allocatable,dimension(:,:) ::id_particle_in_cluster
+      integer, allocatable, dimension(:,:) :: contact
+      save 
+      end module
+
+
+
+      module my_subs
+      Use Precision_Control
+      implicit none
+      contains
+      function cross(a, b)
+      real(kind=double), dimension(3) :: cross
+      real(kind=double), dimension(3), intent(in) :: a, b
+
+      cross(1) = a(2) * b(3) - a(3) * b(2)
+      cross(2) = a(3) * b(1) - a(1) * b(3)
+      cross(3) = a(1) * b(2) - a(2) * b(1)
+      end function cross
+
+      end module my_subs
+
+
+!*************************************************************************************!
+
+!CORE
+!*************************************************************************************! 
+      program main
+      Use Precision_Control
+      Use Param_Control
+      Use Var_Control
+      implicit none
+      integer::  iresi,ibin,ip
+      integer ::ijunk
+      real(kind=double) :: constant, vol, pi =3.14, num_ideal
+      call INITIALIZE
+      
+      read(1,*)
+      read(1,*)
+      do iresi = 1 , Nresi
+         read(1,*)
+      end do
+      
+      do ijunk = 1, Nstepskip*4002
+         read(1,*)
+      end do
+      
+      do istep =1 , (Nstep-Nstepskip)
+         
+         call READ_FILE
+         call FINDCOM
+         call RDF
+         call GETCN
+         call GETCLUSTER
+         !call GETCONTACT_TIME
+         !call GET_DIHEDRAL_DIST
+      end do
+      
+      constant = (1.33333333333)* pi
+      do ibin = 1, Nbin
+         vol = constant*(((ibin*binsize)**3)-((ibin-1)*binsize)**3)
+         num_ideal = vol*rho
+         
+         unnorm_summed_numbers(ibin)=unnorm_summed_numbers(ibin)/(num_ideal)
+      end do
+      do ibin = 1, Nbin
+         !write(200,*) unnorm_summed_numbers(ibin)
+         !write(100, *)ibin*binsize,unnorm_summed_numbers(ibin)/(Npolymer*(Nstep-Nstepskip))
+      end do
+      !write(1500,*) real(av_droplet)/(Nstep-Nstepskip)
+
+      !do ip =1, Npolymer
+      !   write(2000,*) id_droplet(ip,Nstep-Nstepskip)
+      !end do
+      !call GETDIFFUSION
+      write(7000,*) av_largest_cluster/(Nstep-Nstepskip)
+      call GET_DIHEDRAL_DIST
+      end program main
+
+!*************************************************************************************!
+
+!INITIALIZE
+!*************************************************************************************! 
+      subroutine INITIALIZE
+      Use Precision_Control
+      Use Param_Control
+      Use Var_Control
+      implicit none
+      Nstep  = 15500
+      Nstepskip =5500
+      Npolymer = 100
+      Nbead_per_resi = 40
+      Nresi = Npolymer*Nbead_per_resi
+      Ndim           =3
+      boxlen = 302.38
+      Nbin = 500
+      binsize = boxlen/(Nbin)
+      rho     = Nresi/(boxlen**3)
+      allocate(x(Nresi,Nstep), y(Nresi, Nstep), z(Nresi, Nstep))
+      allocate(com(Npolymer, Ndim))
+      allocate(com_x(Npolymer,(Nstep-Nstepskip)))
+      allocate(com_y(Npolymer,(Nstep-Nstepskip)))
+      allocate(com_z(Npolymer,(Nstep-Nstepskip)))
+      allocate(unnorm_summed_numbers(Nbin+1))
+      unnorm_summed_numbers = 0
+      av_droplet= 0
+      av_largest_cluster=0
+      
+      allocate(num_neighbor(Npolymer),neighborlist(Npolymer,(Npolymer-1)))
+      allocate(contact(Npolymer, (Nstep-Nstepskip)))
+      allocate(state(Npolymer))
+      allocate(cluster_head(Npolymer),cluster_tail(Npolymer),cluster_size(Npolymer), cluster_checked(Npolymer))
+      allocate (cluster_list(Npolymer))
+      allocate(listed_id(Npolymer,Npolymer), id_droplet(Npolymer, Nstep))
+      allocate(id_free_single(Npolymer, Nstep))
+      allocate(com_droplet_x(Npolymer, Nstep))
+      allocate(com_droplet_y(Npolymer, Nstep))
+      allocate(com_droplet_z(Npolymer, Nstep))
+      allocate(id_particle_in_cluster(Npolymer,Nstep))
+
+      open (unit = 1 ,file &
+       ="temp", &
+                                                 action="read")
+      !open(unit=900, file="cluster_dyn_0.3.dat", action = "write")
+      !open(unit=1500, file="droplet_poly_1.0.dat", action = "write")     
+      !open(unit=5000, file="msd_polymer_droplet.dat", action="write")
+       open(unit=7000, file="largest_cluster_size_averaged",&
+                                           action="write")
+       
+       open(unit=2000, file="entopy",&
+                                           action="write")
+       open(unit=3000, file="droplet_dist",&
+                                           action="write")
+       open(unit=3001, file="bulk_monomer_dist",&
+                                           action="write")
+
+      end subroutine INITIALIZE
+
+!*************************************************************************************!
+
+!READ TRAJECTORY
+!*************************************************************************************! 
+
+      subroutine READ_FILE
+      Use Precision_Control
+      Use Param_Control
+      Use Var_Control
+      implicit none
+      integer::  iresi
+         read(1,*)
+         read(1,"(i12)") step_num
+         do iresi = 1, Nresi
+            read(1,FMT1) x(iresi, istep),y(iresi, istep),z(iresi, istep)
+         end do
+      !print*, x(Nresi),y (Nresi),z(Nresi)
+      end subroutine READ_FILE
+
+
+!*************************************************************************************!
+
+!FINDING COM FOR POSITIVE AND NEGATIVE RESIDUES OF EACH CHAIN
+!*************************************************************************************! 
+
+      subroutine FINDCOM
+      Use Precision_Control
+      Use Param_Control
+      Use Var_Control
+      implicit none
+      integer::ii, ip,ll, iresi
+      do ip =1 , Npolymer
+         
+         do ii = 1,3
+           
+            com(ip, ii)    =0
+         end do
+      end do
+      
+      do ip = 1, Npolymer
+         ll = (ip-1)*Nbead_per_resi
+         do iresi = ll+1 , ll+Nbead_per_resi
+            com(ip,1)= com(ip,1)+x(iresi, istep)
+            com(ip,2)= com(ip,2)+y(iresi, istep)
+            com(ip,3)= com(ip,3)+z(iresi,istep)
+         end do
+      end do
+      do ip = 1, Npolymer
+         do  ii = 1,3
+             com(ip,ii) =com(ip,ii)/Nbead_per_resi
+             
+         end do
+      end do
+      do ip =1, Npolymer
+         com_x(ip,istep)=com(ip,1)
+         com_y(ip, istep) = com(ip,2)
+         com_z(ip, istep) = com(ip,3)
+      end do
+      end subroutine FINDCOM
+
+!*************************************************************************************!
+
+!BEAD to BEAD RDF
+!*************************************************************************************! 
+
+      subroutine RDF
+      Use Precision_Control
+      Use Param_Control
+      Use Var_Control
+      implicit none
+      real(kind=double) ::d(3),mod_d, pi=3.14, constant
+      integer::iresi,jresi, whichbin
+      integer:: ip,jp,ll,mm
+      constant = (4/3)* pi
+      do ip = 1, Npolymer-1
+       do jp = ip+1, Npolymer
+          if (ip .eq. jp) cycle
+                d(1) = com(jp,1) -com(ip,1)
+                d(2) = com(jp,2) -com(ip,2)
+                d(3) = com(jp,3) -com(ip,3)
+                mod_d = sqrt(d(1)**2 +d(2)**2 +d(3)**2)
+                if (mod_d .gt. 3.7 .and. mod_d .lt. boxlen) then
+                   !if(mod_d .lt. 3.8) then
+                   !  write(500,*) iresi, jresi, mod_d
+                   !end if
+                   whichbin = int(mod_d/binsize)
+                   unnorm_summed_numbers(whichbin+1) = unnorm_summed_numbers(whichbin+1)+2
+                end if
+
+       end do
+      end do 
+      end subroutine RDF
+
+
+
+
+!****************************************************************************************************************!
+!
+! Getting the contacts to define a cut off for a polymner in cluster!                                            !
+!****************************************************************************************************************!
+      subroutine GETCN
+      Use Precision_Control
+      Use Param_Control
+      Use Var_Control
+      implicit none
+
+
+      real(kind=double):: d_from_droplet_com(3),dist,dijbead(3),dij,dijintra(3), dijin
+
+      integer::ip,jp,ll,mm,iresi,jresi,id_poly
+
+        do ip = 1, Npolymer-1
+
+
+       !  if (id_droplet(ip,istep).eq. 1 ) then
+
+
+            ll = (ip-1)*Nbead_per_resi
+            do jp= ip+1, Npolymer
+              ! if (id_droplet(jp,istep).eq. 1 ) then
+                  mm = (jp-1)*Nbead_per_resi
+
+                   do iresi = ll+1,ll+Nbead_per_resi
+                      ! mm = (jp-1)*Nbead_per_resi
+
+                      do jresi = mm+1, mm+Nbead_per_resi
+                      !if (state_poly .eqv. .FALSE.) then
+                      !   exit
+                      !end if
+
+                        dijbead(1) = x(jresi,istep)-x(iresi,istep)
+                        dijbead(2) = y(jresi,istep)-y(iresi,istep)
+                        dijbead(3) = z(jresi,istep)-z(iresi,istep)
+                        dij= sqrt(dijbead(1)**2+dijbead(2)**2+dijbead(3)**2)
+                        if(dij .le. 7) then
+                          contact(ip,istep) = contact(ip,istep)+1
+                          contact(jp,istep) =contact(jp,istep)+ 1
+                        !state_poly =.FALSE.
+                        end if
+                      end do
+                   end do
+               !end if
+            end do
+       !  end if 
+      end do
+
+
+      end subroutine GETCN
+
+
+      
+!*************************************************************************************!
+
+!CLUSTERING TO SEE NEXT
+!*************************************************************************************!
+
+      subroutine GETCLUSTER
+      Use Precision_Control
+      Use Param_Control
+      Use Var_Control
+      implicit none
+      integer :: max_neighbor 
+      integer :: ip, jp, pp, kk, mm, nbrs, nn,zz,qq,ll,rr
+      integer :: ic,jc,ii
+      real(kind=double) ::comij_x,comij_y, comij_z, modrij 
+      real(kind=double):: fraction_droplet
+      logical:: finding_not_completed
+      integer :: temp, largest_cluster, droplet_polymer
+      !Initializing at every time step
+      clustersum = 0
+      droplet_polymer=0
+      do ip = 1, Npolymer
+         do jp = 1, Npolymer-1
+            neighborlist(ip, jp) = 0
+         end do
+      end do
+      do ip = 1, Npolymer
+         state(ip)        = 0
+         num_neighbor(ip) = 0
+      end do
+      do ip =1, Npolymer
+       do jp =1, Npolymer
+          listed_id(ip,jp) =0
+       end do
+      end do
+      
+      !way to find the clusters
+      !create the neighbor list 
+      !go along the neighbor list to find all the neighbors of neighbors
+      !which have not been counted to any cluster till now
+      max_neighbor= Npolymer
+
+      !search the neighbors
+      do ip = 1, Npolymer -1
+         do jp = ip+1, Npolymer
+            comij_x = com(jp,1) -com(ip,1)
+            comij_y = com(jp,2) -com(ip,2)
+            comij_z = com(jp,3) -com(ip,3)
+            modrij = sqrt (comij_x**2 + comij_y**2 + comij_z**2)
+            if (modrij .le. 30 .and. contact(ip,istep) .gt. 4 .and. contact(jp,istep) .gt. 4) then 
+               num_neighbor(ip) = num_neighbor(ip)+1
+               num_neighbor(jp) = num_neighbor(jp)+1
+               neighborlist(ip, num_neighbor(ip)) = jp
+               neighborlist(jp, num_neighbor(jp)) = ip
+            end if 
+         end do
+      end do
+      
+       
+      
+      !you have made your neighbor list 
+      !now go on to find the clusters
+      do ip = 1, Npolymer
+         if (state(ip) .eq. 0) then
+            clustersum =clustersum+1
+            pp = ip
+            state(pp) = clustersum
+            cluster_head(clustersum) = pp
+            cluster_tail(clustersum) = pp
+            cluster_size(clustersum) = 1
+            listed_id(clustersum, cluster_size(clustersum)) =pp
+            id_particle_in_cluster(ip,istep) =clustersum
+            !defined a logical variable in order to understand when to
+            !end and when to start
+            finding_not_completed  = .TRUE.
+            do while (finding_not_completed)
+               nbrs = num_neighbor(pp)
+               kk = 1
+               do while (kk .le. nbrs)
+                  mm = neighborlist(pp, kk)
+                  if (state(mm) .eq. 0) then 
+                     cluster_list(cluster_tail(clustersum))= mm
+                     cluster_tail(clustersum)              = mm
+                     cluster_size(clustersum)              =cluster_size(clustersum)+1
+                     state(mm) = clustersum
+                     listed_id(clustersum, cluster_size(clustersum)) =mm
+                     id_particle_in_cluster(mm,istep) = clustersum
+                     !print*, listed_id(clustersum,cluster_size(clustersum))
+                  end if
+                  kk =kk+1
+               end do
+               cluster_checked(clustersum) = pp
+               if (pp .eq.cluster_tail(clustersum)) then
+                  finding_not_completed = .FALSE.
+                  cluster_list(pp) = 0
+               end if
+               pp = cluster_list(pp)
+            end do
+         end if
+      end do
+      !print*, com(100,1)
+      !do ic = 1, clustersum
+      !   write(1100, *) cluster_size(ic)
+      !end do
+      do ic = 1, clustersum
+         if(cluster_size(ic) .gt. 3) then
+           droplet_polymer = droplet_polymer +cluster_size(ic)
+         end if
+      end do
+      av_droplet= av_droplet+droplet_polymer
+      fraction_droplet = droplet_polymer/Npolymer 
+      largest_cluster= maxval(cluster_size)
+       do ic = 1, clustersum
+         if( cluster_size(ic) .eq. largest_cluster) then
+           zz = cluster_size(ic)
+           !print*, zz
+           do nn =1, zz
+              id_droplet(listed_id(ic,nn),istep) =1
+              !print*,listed_id(ic,nn),id_droplet(listed_id(ic,nn),istep)
+              
+           end do
+         else 
+          zz=cluster_size(ic)
+          do nn =1, zz
+              id_droplet(listed_id(ic,nn),istep) =0
+              !print*,listed_id(ic,nn),id_droplet(listed_id(ic,nn),istep)
+           end do
+         end if
+       end do
+
+       do ic = 1, clustersum
+         if( cluster_size(ic) .lt. 2) then
+           zz = cluster_size(ic)
+           !print*, zz
+           do nn =1, zz
+              id_free_single(listed_id(ic,nn),istep) =1
+              !print*,listed_id(ic,nn),id_droplet(listed_id(ic,nn),istep)
+
+           end do
+         else 
+           zz = cluster_size(ic)
+           do nn =1, zz
+              id_free_single(listed_id(ic,nn),istep) =0
+              !print*,listed_id(ic,nn),id_droplet(listed_id(ic,nn),istep)
+
+           end do
+         end if
+       end do
+
+
+
+
+
+       !calculate the COM of droplet
+       do ic = 1, clustersum
+
+          do nn=1,cluster_size(ic)
+             ll=listed_id(ic,nn)
+             !qq=(ll-1)*Nbead_per_resi
+             !do rr=1, Nbead_per_resi
+
+              !  com_droplet_x(ic,istep)=com_droplet_x(ic,istep)+x(qq+rr)
+              !  com_droplet_y(ic,istep)=com_droplet_y(ic,istep)+y(qq+rr)
+              !  com_droplet_z(ic,istep)=com_droplet_z(ic,istep)+z(qq+rr)
+               com_droplet_x(ic,istep)=com_droplet_x(ic,istep)+com_x(listed_id(ic,nn),istep)
+               com_droplet_y(ic,istep)=com_droplet_y(ic,istep)+com_y(listed_id(ic,nn),istep)
+               com_droplet_z(ic,istep)=com_droplet_z(ic,istep)+com_z(listed_id(ic,nn),istep)
+             !end do
+          end do
+          !com_droplet_x(ic,istep)=com_droplet_x(ic,istep)/(Nbead_per_resi*cluster_size(ic))
+          !com_droplet_y(ic,istep)=com_droplet_y(ic,istep)/(Nbead_per_resi*cluster_size(ic))
+          !com_droplet_z(ic,istep)=com_droplet_z(ic,istep)/(Nbead_per_resi*cluster_size(ic))
+          com_droplet_x(ic,istep)=com_droplet_x(ic,istep)/(cluster_size(ic))
+          com_droplet_y(ic,istep)=com_droplet_y(ic,istep)/(cluster_size(ic))
+          com_droplet_z(ic,istep)=com_droplet_z(ic,istep)/(cluster_size(ic))
+
+       end do
+ 
+
+       av_largest_cluster = av_largest_cluster+largest_cluster
+
+       !Now find out the largest cluster
+
+     
+
+
+     !  do ic = 1, clustersum
+     !    do jc = ic, clustersum 
+     !       if(cluster_size(ic) .lt. cluster_size(jc)) then
+     !         temp = cluster_size(jc)
+     !         cluster_size(jc) = cluster_size(ic)
+     !         cluster_size(ic) = temp
+     !       end if
+     !    end do
+     ! end do
+     ! largest_cluster = cluster_size(1)        
+      !write(700,*) largest_cluster, clustersum
+      !write(700,*) "stepdone=", istep 
+      !write(800,*) step_num,real(Npolymer-droplet_polymer)/Npolymer,real(droplet_polymer)/Npolymer
+      !write(900,*) step_num,largest_cluster
+
+             
+           
+         
+
+      end subroutine GETCLUSTER
+
+
+!CONTACT of polymers
+!*************************************************************************************!
+      subroutine GETCONTACT_TIME
+      Use Precision_Control
+      Use Param_Control
+      Use Var_Control
+      implicit none
+      logical::status_go
+      real(kind=double)::d(3), d_sq, sum_dis_sq
+      real(kind=double):: d_from_droplet_com(3), dist, dijbead(3),dij,dijintra(3), dijin
+      real(kind=double)::rg_monomer
+      integer ::ip,jp,ll,mm,iresi,jresi,id_poly,cn(Npolymer),cn_intra(Npolymer),cn_free(Npolymer)
+      integer :: count_free_pts, test_var
+      real(kind=double) ::av_cn_free
+      logical:: state_poly
+      do ip = 1, Npolymer
+         cn(ip) =0
+         cn_intra(ip)=0
+         cn_free(ip) =0
+      end do
+      count_free_pts=0
+      av_cn_free    =0
+      do ip = 1, Npolymer
+      ! if (id_droplet(ip,istep).eq. 1 ) then
+         ll = (ip-1)*Nbead_per_resi
+         do iresi = ll+1,ll+Nbead_per_resi-1
+            do jresi = iresi+3, ll+Nbead_per_resi
+               
+               dijintra(1) = x(jresi,istep)-x(iresi,istep)
+               dijintra(2) = y(jresi,istep)-y(iresi,istep)
+               dijintra(3) = z(jresi,istep)-z(iresi,istep)
+               dijin= sqrt(dijintra(1)**2+ dijintra(2)**2+dijintra(3)**2)
+               if(dijin .le. 7) then
+                 cn_intra(ip) = cn_intra(ip)+1
+               end if
+             end do
+         end do
+      ! end if
+        write((10000+ip), *) istep, cn_intra(ip)
+      end do
+
+
+      do ip = 1, Npolymer-1
+        
+            
+       !  if (id_droplet(ip,istep).eq. 1 ) then
+            
+            sum_dis_sq = 0
+            ll = (ip-1)*Nbead_per_resi
+            do jp= ip+1, Npolymer
+              ! if (id_droplet(jp,istep).eq. 1 ) then
+                  mm = (jp-1)*Nbead_per_resi
+
+                   do iresi = ll+1,ll+Nbead_per_resi
+               
+                
+                  
+                   
+                     ! mm = (jp-1)*Nbead_per_resi
+                   
+                      do jresi = mm+1, mm+Nbead_per_resi
+                      !if (state_poly .eqv. .FALSE.) then
+                      !   exit
+                      !end if
+
+                        dijbead(1) = x(jresi,istep)-x(iresi,istep)
+                        dijbead(2) = y(jresi,istep)-y(iresi,istep)
+                        dijbead(3) = z(jresi,istep)-z(iresi,istep) 
+                        dij= sqrt(dijbead(1)**2+ dijbead(2)**2+dijbead(3)**2)
+                        if(dij .le. 7) then
+                          cn(ip) = cn(ip)+1
+                          cn(jp) =cn(jp)+ 1
+                        !state_poly =.FALSE.
+                        end if
+                      end do
+                   end do
+               !end if
+            end do   
+       !  end if 
+           
+      end do  
+
+
+
+
+
+      do ip = 1, Npolymer
+         write((20000+ip), *) istep,  cn(ip)
+      end do
+      end subroutine GETCONTACT_TIME
+
+!GET DIHEDRAL DISTRIBUTION
+!*************************************************************************************!
+      subroutine GET_DIHEDRAL_DIST
+      Use Precision_Control
+      Use Param_Control
+      Use Var_Control
+      Use my_subs
+      implicit none
+      real(kind=double)::b1(3), b2(3), b3(3),n1(3),n2(3), m1(3),dihedral
+      real(kind=double):: mod_b1, mod_b2, mod_b3, mod_n1, mod_n2,ex,ey
+      integer:: ib,ip, jp, iresi, jresi, ll, mm, iframe
+
+      integer:: Nbin_dih, whichbin_dih, count_data_pt_droplet,count_data_pt_bulk
+      real(kind=double):: binsize_dih
+      real(kind=double), allocatable,dimension(:)::hist_dih_droplet,hist_dih_bulk, sum_hist_droplet, sum_hist_bulk
+      real(kind=double)::sum_entropy_droplet, sum_entropy_bulk
+      !print*, "entered"
+      sum_entropy_droplet =0
+      sum_entropy_bulk   =0
+      Nbin_dih = 50
+      allocate(hist_dih_droplet(Nbin_dih+1), hist_dih_bulk(Nbin_dih+1))
+      allocate (sum_hist_droplet(Nbin+1), sum_hist_bulk(Nbin+1))
+      binsize_dih= (3.14-(-3.14))/Nbin_dih
+      do jresi = 1, Nbead_per_resi-3
+         do ib = 1,Nbin_dih
+            hist_dih_droplet(ib) = 0
+            hist_dih_bulk(ib) = 0
+            !sum_hist_droplet(ib) =0
+            !sum_hist_bulk(ib) =0
+         end do
+         count_data_pt_droplet =0
+         count_data_pt_bulk =0
+        do iframe = 1, Nstep-Nstepskip
+           do ip = 1, Npolymer
+               !print*, "hey jude!"
+              if (id_droplet(ip,iframe).eq. 1 ) then
+                 !print*, "hey jude!"
+
+                 count_data_pt_droplet=count_data_pt_droplet+1
+                 ll = (ip-1)*Nbead_per_resi
+                 iresi = ll+jresi
+                 !print*, count_data_pt 
+                 b1(1)= x(iresi+1, iframe)-x(iresi,iframe) 
+                 b1(2)= y(iresi+1,iframe)-y(iresi,iframe)
+                 b1(3) = z(iresi+1,iframe)-z(iresi,iframe)
+                 mod_b1 =sqrt(b1(1)**2 +b1(2)**2 + b1(3)**2)
+                 b1(:) = b1(:)/mod_b1
+                 b2(1) = x(iresi+2,iframe)-x(iresi+1,iframe)
+                 b2(2) = y(iresi+2,iframe)-y(iresi+1,iframe)
+                 b2(3) = z(iresi+2,iframe)-z(iresi+1,iframe)
+                 mod_b2 = sqrt(b2(1)**2 +b2(2)**2 + b2(3)**2)
+                 b2(:) = b2(:)/mod_b2
+                 b3(1) = x(iresi+3,iframe)-x(iresi+2,iframe)
+                 b3(2) = y(iresi+3,iframe)-y(iresi+2,iframe)
+                 b3(3) = z(iresi+3,iframe)-z(iresi+2,iframe)
+                 mod_b3 = sqrt(b3(1)**2 +b3(2)**2 + b3(3)**2)
+                 b3(:) = b3(:)/mod_b3
+                 n1   = cross(b1,b2)
+                 mod_n1 = sqrt(n1(1)**2 +n1(2)**2 + n1(3)**2)
+                 n2   =cross(b2,b3)
+                 mod_n2 = sqrt(n2(1)**2 +n2(2)**2 + n2(3)**2)
+                 n1(:) =n1(:)/mod_n1
+                 n2(:) =n2(:)/mod_n2
+             
+
+
+                 m1   =cross(n1,b2) 
+                 ex=dot_product(n1,n2)
+                 ey=dot_product(m1,n2)
+                 dihedral= atan2(ey,ex)
+                 whichbin_dih= int((dihedral+3.14)/binsize_dih)
+                 !print*, whichbin_dih
+                 hist_dih_droplet(whichbin_dih+1) = hist_dih_droplet(whichbin_dih+1)+1 
+              else if (id_droplet(ip,iframe).eq. 0 .and. id_free_single(ip,iframe) .eq. 1) then
+                 
+
+                          count_data_pt_bulk=count_data_pt_bulk+1
+                          ll = (ip-1)*Nbead_per_resi
+                          iresi = ll+jresi
+                 !print*, count_data_pt 
+                          b1(1)= x(iresi+1, iframe)-x(iresi,iframe)
+                          b1(2)= y(iresi+1,iframe)-y(iresi,iframe)
+                          b1(3) = z(iresi+1,iframe)-z(iresi,iframe)
+                          mod_b1 =sqrt(b1(1)**2 +b1(2)**2 + b1(3)**2)
+                          b1(:) = b1(:)/mod_b1
+                          b2(1) = x(iresi+2,iframe)-x(iresi+1,iframe)
+                          b2(2) = y(iresi+2,iframe)-y(iresi+1,iframe)
+                          b2(3) = z(iresi+2,iframe)-z(iresi+1,iframe)
+                          mod_b2 = sqrt(b2(1)**2 +b2(2)**2 + b2(3)**2)
+                          b2(:) = b2(:)/mod_b2
+                          b3(1) = x(iresi+3,iframe)-x(iresi+2,iframe)
+                          b3(2) = y(iresi+3,iframe)-y(iresi+2,iframe)
+                          b3(3) = z(iresi+3,iframe)-z(iresi+2,iframe)
+                          mod_b3 = sqrt(b3(1)**2 +b3(2)**2 + b3(3)**2)
+                          b3(:) = b3(:)/mod_b3
+                          n1   = cross(b1,b2)
+                          mod_n1 = sqrt(n1(1)**2 +n1(2)**2 + n1(3)**2)
+                          n2   =cross(b2,b3)
+                          mod_n2 = sqrt(n2(1)**2 +n2(2)**2 + n2(3)**2)
+                          n1(:) =n1(:)/mod_n1
+                          n2(:) =n2(:)/mod_n2
+
+
+
+                          m1   =cross(n1,b2)
+                          ex=dot_product(n1,n2)
+                          ey=dot_product(m1,n2)
+                          dihedral= atan2(ey,ex)
+                          whichbin_dih= int((dihedral+3.14)/binsize_dih)
+                          !print*, whichbin_dih
+                          hist_dih_bulk(whichbin_dih+1) =hist_dih_bulk(whichbin_dih+1)+1 
+
+
+             end if   
+                 
+           end do
+         end do
+         
+         do ib =1, Nbin_dih
+            
+            hist_dih_droplet(ib)=hist_dih_droplet(ib)/count_data_pt_droplet
+            hist_dih_bulk(ib)=hist_dih_bulk(ib)/count_data_pt_bulk
+            sum_hist_droplet(ib) = sum_hist_droplet(ib)+hist_dih_droplet(ib)
+            sum_hist_bulk(ib) =sum_hist_bulk(ib)+hist_dih_bulk(ib)
+
+            write(4000+jresi,*) (ib*binsize_dih-3.14),hist_dih_droplet(ib)
+            write(5000+jresi,*) (ib*binsize_dih-3.14), hist_dih_bulk(ib)
+            !print*, hist_dih(ib)
+            if(hist_dih_droplet(ib) .ne. 0) then
+              sum_entropy_droplet=sum_entropy_droplet+hist_dih_droplet(ib)*log(hist_dih_droplet(ib))
+            end if
+            if (hist_dih_bulk(ib) .ne. 0) then 
+               sum_entropy_bulk=sum_entropy_bulk+hist_dih_bulk(ib) *log(hist_dih_bulk(ib))
+            end if
+         end do
+        ! print*, sum_entropy_bulk 
+
+
+      end do
+      sum_hist_droplet(:) =sum_hist_droplet(:)/(Nbead_per_resi-3)
+      sum_hist_bulk(:) =sum_hist_bulk(:)/(Nbead_per_resi-3)
+      do ib = 1, Nbin_dih
+         write(3000,*) (ib*binsize_dih-3.14),sum_hist_droplet(ib)
+         write(3001,*) (ib*binsize_dih-3.14), sum_hist_bulk(ib)
+      end do
+      write(2000,*)"entropy inside droplet=", -(sum_entropy_droplet)
+      write(2000,*)"entropy outside droplet=", -(sum_entropy_bulk)
+      end subroutine GET_DIHEDRAL_DIST
+      
+      
+
+
